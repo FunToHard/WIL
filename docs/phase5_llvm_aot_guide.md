@@ -1,7 +1,7 @@
 # WML Phase 5: LLVM AOT Release Pipeline & Standalone Executable Guide
 
 **Author:** WML Core Compiler & Systems Team  
-**Specification:** [WML Language Specification](file:///F:/DEV/WML/docs/spec/WML_LANGUAGE_SPECIFICATION.md) | [Compiler & Runtime Architecture](file:///F:/DEV/WML/docs/wml_compiler_runtime_architecture.md)  
+**Specification:** [WML Language Specification](spec/WML_LANGUAGE_SPECIFICATION.md) | [Compiler & Runtime Architecture](wml_compiler_runtime_architecture.md)  
 **Milestone:** Phase 5 LLVM AOT Release Pipeline & Dual-Target Static Binaries (`x86_64` & `ARM64`)  
 
 ---
@@ -22,11 +22,11 @@ While Phase 3 provides sub-15ms JIT compilation via Cranelift for local developm
    - High-throughput targeting for standard enterprise Linux, Windows, and macOS x86 servers (`x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`).
 3. **Clang / LLVM Release Compilation Pipeline:**
    - Detects `clang` toolchain automatically.
-   - Compiles `.ll` into native static objects and standalone executable binaries with `-O3 -flto`.
+   - Compiles `.ll` into native static objects via `clang -O3 -c`.
    - Supports cross-compilation via `--target aarch64` / `--target x86_64`.
 4. **AI-First Release Manifest & Lifecycle Events (`--format=ai-json`):**
    - Generates production `dist/manifest.json` containing routes, pages, micro-signals JS assets, LLVM IR path, and compiled binary metadata.
-   - Machine-actionable lifecycle event `release_build_complete` for continuous delivery agents.
+   - Machine-actionable lifecycle event `build_complete` (with `release: true`) for continuous delivery agents.
 
 ---
 

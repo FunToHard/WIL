@@ -211,10 +211,9 @@ impl LlvmIrEmitter {
         }
 
         // 2. Entry block: allocate local memory locations and store parameters
-        let mut block_params: HashMap<BlockId, Vec<ValueId>> = HashMap::new();
+        let mut block_params: HashMap<BlockId, Vec<(ValueId, MirType)>> = HashMap::new();
         for bb in &func.blocks {
-            let p_vals = bb.params.iter().map(|(v, _)| *v).collect();
-            block_params.insert(bb.id, p_vals);
+            block_params.insert(bb.id, bb.params.clone());
         }
 
         ir.push_str("entry:\n");
@@ -249,7 +248,7 @@ impl LlvmIrEmitter {
                 self.emit_instruction(ir, *dest, inst, ty, func, &value_types);
             }
 
-            self.emit_terminator(ir, &bb.terminator, &func.return_ty, &block_params);
+            self.emit_terminator(ir, bb.id, &bb.terminator, &func.return_ty, &block_params);
         }
 
         ir.push_str("}\n");
@@ -346,34 +345,36 @@ impl LlvmIrEmitter {
                     dest_ty, dest.0, dest.0
                 ));
             }
-            MirInst::Unary { op, operand } => {
-                ir.push_str(&format!(
-                    "  %u_val_{} = load i64, ptr %v_{}, align 8\n",
-                    dest.0, operand.0
-                ));
-                match op {
-                    MirUnaryOp::Neg => {
-                        ir.push_str(&format!(
-                            "  %un_{} = sub i64 0, %u_val_{}\n",
-                            dest.0, dest.0
-                        ));
-                        ir.push_str(&format!(
-                            "  store i64 %un_{}, ptr %v_{}, align 8\n",
-                            dest.0, dest.0
-                        ));
-                    }
-                    MirUnaryOp::Not => {
-                        ir.push_str(&format!(
-                            "  %un_{} = icmp eq i64 %u_val_{}, 0\n",
-                            dest.0, dest.0
-                        ));
-                        ir.push_str(&format!(
-                            "  store i1 %un_{}, ptr %v_{}, align 1\n",
-                            dest.0, dest.0
-                        ));
-                    }
+            MirInst::Unary { op, operand } => match op {
+                MirUnaryOp::Neg => {
+                    ir.push_str(&format!(
+                        "  %u_val_{} = load i64, ptr %v_{}, align 8\n",
+                        dest.0, operand.0
+                    ));
+                    ir.push_str(&format!(
+                        "  %un_{} = sub i64 0, %u_val_{}\n",
+                        dest.0, dest.0
+                    ));
+                    ir.push_str(&format!(
+                        "  store i64 %un_{}, ptr %v_{}, align 8\n",
+                        dest.0, dest.0
+                    ));
                 }
-            }
+                MirUnaryOp::Not => {
+                    ir.push_str(&format!(
+                        "  %u_val_{} = load i1, ptr %v_{}, align 1\n",
+                        dest.0, operand.0
+                    ));
+                    ir.push_str(&format!(
+                        "  %un_{} = xor i1 %u_val_{}, true\n",
+                        dest.0, dest.0
+                    ));
+                    ir.push_str(&format!(
+                        "  store i1 %un_{}, ptr %v_{}, align 1\n",
+                        dest.0, dest.0
+                    ));
+                }
+            },
             MirInst::Copy(src) => {
                 let llvm_ty = Self::mir_type_to_llvm(ty);
                 ir.push_str(&format!(
@@ -583,19 +584,20 @@ impl LlvmIrEmitter {
     fn emit_terminator(
         &self,
         ir: &mut String,
+        bb_id: BlockId,
         term: &MirTerminator,
         return_ty: &MirType,
-        block_params: &HashMap<BlockId, Vec<ValueId>>,
+        block_params: &HashMap<BlockId, Vec<(ValueId, MirType)>>,
     ) {
         match term {
             MirTerminator::Return(opt_val) => {
                 if let Some(val_id) = opt_val {
                     let llvm_ty = Self::mir_type_to_llvm(return_ty);
                     ir.push_str(&format!(
-                        "  %ret_val = load {}, ptr %v_{}, align 8\n",
-                        llvm_ty, val_id.0
+                        "  %ret_val_{} = load {}, ptr %v_{}, align 8\n",
+                        bb_id.0, llvm_ty, val_id.0
                     ));
-                    ir.push_str(&format!("  ret {} %ret_val\n", llvm_ty));
+                    ir.push_str(&format!("  ret {} %ret_val_{}\n", llvm_ty, bb_id.0));
                 } else {
                     ir.push_str("  ret void\n");
                 }
@@ -603,14 +605,16 @@ impl LlvmIrEmitter {
             MirTerminator::Jump { target, args } => {
                 if let Some(target_p) = block_params.get(target) {
                     for (i, arg_id) in args.iter().enumerate() {
-                        if let Some(param_id) = target_p.get(i) {
+                        if let Some((param_id, param_ty)) = target_p.get(i) {
+                            let p_ty = Self::mir_type_to_llvm(param_ty);
+                            let align = if p_ty == "i1" { 1 } else { 8 };
                             ir.push_str(&format!(
-                                "  %j_arg_{}_{} = load i64, ptr %v_{}, align 8\n",
-                                target.0, i, arg_id.0
+                                "  %j_arg_{}_{}_{} = load {}, ptr %v_{}, align {}\n",
+                                bb_id.0, target.0, i, p_ty, arg_id.0, align
                             ));
                             ir.push_str(&format!(
-                                "  store i64 %j_arg_{}_{}, ptr %v_{}, align 8\n",
-                                target.0, i, param_id.0
+                                "  store {} %j_arg_{}_{}_{}, ptr %v_{}, align {}\n",
+                                p_ty, bb_id.0, target.0, i, param_id.0, align
                             ));
                         }
                     }
@@ -625,44 +629,55 @@ impl LlvmIrEmitter {
                 else_args,
             } => {
                 ir.push_str(&format!(
-                    "  %cond_val = load i1, ptr %v_{}, align 1\n",
-                    cond.0
+                    "  %cond_val_{} = load i1, ptr %v_{}, align 1\n",
+                    bb_id.0, cond.0
                 ));
                 if let Some(target_p) = block_params.get(then_block) {
                     for (i, arg_id) in then_args.iter().enumerate() {
-                        if let Some(param_id) = target_p.get(i) {
+                        if let Some((param_id, param_ty)) = target_p.get(i) {
+                            let p_ty = Self::mir_type_to_llvm(param_ty);
+                            let align = if p_ty == "i1" { 1 } else { 8 };
                             ir.push_str(&format!(
-                                "  %br_t_arg_{}_{} = load i64, ptr %v_{}, align 8\n",
-                                then_block.0, i, arg_id.0
+                                "  %br_t_arg_{}_{}_{} = load {}, ptr %v_{}, align {}\n",
+                                bb_id.0, then_block.0, i, p_ty, arg_id.0, align
                             ));
                             ir.push_str(&format!(
-                                "  store i64 %br_t_arg_{}_{}, ptr %v_{}, align 8\n",
-                                then_block.0, i, param_id.0
+                                "  store {} %br_t_arg_{}_{}_{}, ptr %v_{}, align {}\n",
+                                p_ty, bb_id.0, then_block.0, i, param_id.0, align
                             ));
                         }
                     }
                 }
                 if let Some(target_p) = block_params.get(else_block) {
                     for (i, arg_id) in else_args.iter().enumerate() {
-                        if let Some(param_id) = target_p.get(i) {
+                        if let Some((param_id, param_ty)) = target_p.get(i) {
+                            let p_ty = Self::mir_type_to_llvm(param_ty);
+                            let align = if p_ty == "i1" { 1 } else { 8 };
                             ir.push_str(&format!(
-                                "  %br_e_arg_{}_{} = load i64, ptr %v_{}, align 8\n",
-                                else_block.0, i, arg_id.0
+                                "  %br_e_arg_{}_{}_{} = load {}, ptr %v_{}, align {}\n",
+                                bb_id.0, else_block.0, i, p_ty, arg_id.0, align
                             ));
                             ir.push_str(&format!(
-                                "  store i64 %br_e_arg_{}_{}, ptr %v_{}, align 8\n",
-                                else_block.0, i, param_id.0
+                                "  store {} %br_e_arg_{}_{}_{}, ptr %v_{}, align {}\n",
+                                p_ty, bb_id.0, else_block.0, i, param_id.0, align
                             ));
                         }
                     }
                 }
                 ir.push_str(&format!(
-                    "  br i1 %cond_val, label %bb{}, label %bb{}\n",
-                    then_block.0, else_block.0
+                    "  br i1 %cond_val_{}, label %bb{}, label %bb{}\n",
+                    bb_id.0, then_block.0, else_block.0
                 ));
             }
             MirTerminator::Throw { status, .. } => {
-                ir.push_str(&format!("  ret i64 {}\n", status));
+                let llvm_ty = Self::mir_type_to_llvm(return_ty);
+                match llvm_ty {
+                    "void" => ir.push_str("  ret void\n"),
+                    "i1" => ir.push_str("  ret i1 false\n"),
+                    "ptr" => ir.push_str("  ret ptr null\n"),
+                    "i64" => ir.push_str(&format!("  ret i64 {}\n", status)),
+                    _ => ir.push_str(&format!("  ret {} 0\n", llvm_ty)),
+                }
             }
             MirTerminator::Unreachable => {
                 ir.push_str("  unreachable\n");

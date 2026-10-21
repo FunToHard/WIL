@@ -657,7 +657,15 @@ fn main() -> anyhow::Result<()> {
 
             // 7. LLVM AOT Compilation for Production Release
             let target_config = if let Some(t) = &target {
-                TargetConfig::parse(t).unwrap_or_else(TargetConfig::host)
+                match TargetConfig::parse(t) {
+                    Some(cfg) => cfg,
+                    None => {
+                        anyhow::bail!(
+                            "Unrecognized target '{}'. Supported architectures: x86_64, aarch64 (arm64)",
+                            t
+                        );
+                    }
+                }
             } else {
                 TargetConfig::host()
             };
@@ -667,43 +675,40 @@ fn main() -> anyhow::Result<()> {
 
             if release {
                 let llvm_compiler = LlvmCompiler::new();
-                match llvm_compiler.compile_to_ir(&mir_module, &target_config) {
-                    Ok(ir) => {
-                        let ir_path = out_dir.join("app.ll");
-                        fs::write(&ir_path, &ir)?;
-                        llvm_ir_meta = Some(serde_json::json!({
-                            "path": ir_path.display().to_string(),
-                            "size_bytes": ir.len(),
-                            "target_triple": target_config.triple(),
-                        }));
+                let ir = llvm_compiler
+                    .compile_to_ir(&mir_module, &target_config)
+                    .map_err(|e| anyhow::anyhow!("LLVM IR generation failed: {}", e))?;
 
-                        if LlvmCompiler::is_clang_available() {
-                            let bin_dir = out_dir.join("bin");
-                            fs::create_dir_all(&bin_dir)?;
-                            let obj_path = bin_dir.join(format!(
-                                "app.{}",
-                                if target_config.os == TargetOs::Windows {
-                                    "obj"
-                                } else {
-                                    "o"
-                                }
-                            ));
-                            if let Ok(compiled_path) =
-                                llvm_compiler.compile_to_object(&ir, &target_config, &obj_path)
-                            {
-                                let sz = fs::metadata(&compiled_path).map(|m| m.len()).unwrap_or(0);
-                                binary_meta = Some(serde_json::json!({
-                                    "path": compiled_path.display().to_string(),
-                                    "size_bytes": sz,
-                                    "target_triple": target_config.triple(),
-                                    "status": "compiled_object",
-                                }));
-                            }
+                let ir_path = out_dir.join("app.ll");
+                fs::write(&ir_path, &ir)?;
+                llvm_ir_meta = Some(serde_json::json!({
+                    "path": ir_path.display().to_string(),
+                    "size_bytes": ir.len(),
+                    "target_triple": target_config.triple(),
+                }));
+
+                if LlvmCompiler::is_clang_available() {
+                    let bin_dir = out_dir.join("bin");
+                    fs::create_dir_all(&bin_dir)?;
+                    let obj_path = bin_dir.join(format!(
+                        "app.{}",
+                        if target_config.os == TargetOs::Windows {
+                            "obj"
+                        } else {
+                            "o"
                         }
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: LLVM IR generation failed: {}", e);
-                    }
+                    ));
+                    let compiled_path = llvm_compiler
+                        .compile_to_object(&ir, &target_config, &obj_path)
+                        .map_err(|e| anyhow::anyhow!("Clang compilation failed: {}", e))?;
+
+                    let sz = fs::metadata(&compiled_path).map(|m| m.len()).unwrap_or(0);
+                    binary_meta = Some(serde_json::json!({
+                        "path": compiled_path.display().to_string(),
+                        "size_bytes": sz,
+                        "target_triple": target_config.triple(),
+                        "status": "compiled_object",
+                    }));
                 }
             }
 
