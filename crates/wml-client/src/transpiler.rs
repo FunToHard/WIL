@@ -141,6 +141,14 @@ if (typeof document !== 'undefined') {
             ui.name
         ));
 
+        // Unpack island parameters from props
+        for param in &ui.params {
+            js.push_str(&format!(
+                "    const {name} = props.{name} !== undefined ? props.{name} : undefined;\n",
+                name = param.name
+            ));
+        }
+
         let mut var_counter = 0;
         let mut signals = HashSet::new();
 
@@ -203,7 +211,7 @@ if (typeof document !== 'undefined') {
 
                     js.push_str(&format!(
                         r#"    async function {name}({params}) {{
-        const res = await fetch(`/_wml/rpc/{name}`, {{
+        const res = await fetch(`/_wml/rpc/{ui_name}/{name}`, {{
             method: 'POST',
             headers: {{ 'Content-Type': 'application/json' }},
             body: JSON.stringify({{ {payload} }})
@@ -211,6 +219,7 @@ if (typeof document !== 'undefined') {
         return await res.json();
     }}
 "#,
+                        ui_name = ui.name,
                         name = name,
                         params = params_str,
                         payload = payload_str

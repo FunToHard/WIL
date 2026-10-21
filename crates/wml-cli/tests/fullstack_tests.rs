@@ -162,6 +162,17 @@ fn test_fullstack_dev_routes_and_html_dispatch() {
             "Expected script tag for islands.js: {}",
             html
         );
+        assert_eq!(
+            html.matches("/_wml/assets/islands.js").count(),
+            1,
+            "Expected exactly one islands.js script tag in HTML"
+        );
+        assert!(
+            html.contains(
+                r#"<script type="module" src="/_wml/assets/islands.js"></script></body>"#
+            ),
+            "Expected script tag immediately before closing body"
+        );
     }
 
     // Dispatch RPC action POST /_wml/rpc/syncClicks
@@ -182,4 +193,25 @@ fn test_fullstack_dev_routes_and_html_dispatch() {
     let rpc_status = unsafe { rpc_handler(arena_ptr, &rpc_req, &mut rpc_res) };
     assert_eq!(rpc_status, 0);
     assert_eq!(rpc_res.status, 200);
+    unsafe {
+        assert_eq!(rpc_res.content_type.as_str(), "application/json");
+        assert_eq!(rpc_res.body.as_str(), "1");
+    }
+
+    // Also verify scoped RPC route POST /_wml/rpc/ClickIsland/syncClicks
+    let scoped_rpc_route = compiled
+        .routes
+        .iter()
+        .find(|r| r.method == "POST" && r.path == "/_wml/rpc/ClickIsland/syncClicks")
+        .expect("Scoped RPC route not found");
+    let scoped_rpc_handler: RouteHandlerFn =
+        unsafe { std::mem::transmute(scoped_rpc_route.fn_ptr) };
+    let mut scoped_rpc_res = WmlHttpResponse::new();
+    let scoped_status = unsafe { scoped_rpc_handler(arena_ptr, &rpc_req, &mut scoped_rpc_res) };
+    assert_eq!(scoped_status, 0);
+    assert_eq!(scoped_rpc_res.status, 200);
+    unsafe {
+        assert_eq!(scoped_rpc_res.content_type.as_str(), "application/json");
+        assert_eq!(scoped_rpc_res.body.as_str(), "1");
+    }
 }

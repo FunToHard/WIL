@@ -27,7 +27,9 @@ fn test_transpile_click_island() {
     let js = res.unwrap();
     assert!(js.contains("export function signal"));
     assert!(js.contains("export function mount_ClickIsland"));
+    assert!(js.contains("const initial = props.initial !== undefined ? props.initial : undefined;"));
     assert!(js.contains("async function syncClicks(delta)"));
+    assert!(js.contains("/_wml/rpc/ClickIsland/syncClicks"));
     assert!(js.contains("document.createElement(\"div\")"));
     assert!(js.contains("document.createElement(\"button\")"));
     assert!(js.contains("addEventListener(\"click\""));

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::OnceLock;
 use wml_client::ClientTranspiler;
 use wml_codegen_cranelift::CraneliftJitBackend;
 use wml_diagnostics::{
@@ -16,19 +16,17 @@ use wml_runtime::{HttpReactor, RouteHandlerFn};
 use wml_syntax::ast::Item;
 use wml_syntax::parse;
 
-static ISLAND_JS: Mutex<Option<Box<[u8]>>> = Mutex::new(None);
+static ISLAND_JS: OnceLock<&'static [u8]> = OnceLock::new();
 
 unsafe extern "C" fn islands_asset_handler(
     _arena: *mut RequestArena,
     _req: *const WmlHttpRequest,
     res: *mut WmlHttpResponse,
 ) -> i64 {
-    if let Ok(guard) = ISLAND_JS.lock() {
-        if let Some(bytes) = guard.as_ref() {
-            (*res).status = 200;
-            (*res).content_type = WmlSlice::from_slice(b"application/javascript; charset=utf-8");
-            (*res).body = WmlSlice::from_slice(bytes);
-        }
+    if let Some(&bytes) = ISLAND_JS.get() {
+        (*res).status = 200;
+        (*res).content_type = WmlSlice::from_slice(b"application/javascript; charset=utf-8");
+        (*res).body = WmlSlice::from_slice(bytes);
     }
     0
 }
@@ -436,9 +434,9 @@ fn main() -> anyhow::Result<()> {
             if !uis.is_empty() {
                 let transpiler = ClientTranspiler::new();
                 if let Ok(bundle) = transpiler.bundle_islands(&uis, &arena) {
-                    if let Ok(mut guard) = ISLAND_JS.lock() {
-                        *guard = Some(bundle.into_bytes().into_boxed_slice());
-                    }
+                    let static_bytes: &'static [u8] =
+                        Box::leak(bundle.into_bytes().into_boxed_slice());
+                    let _ = ISLAND_JS.set(static_bytes);
                     reactor.add_route("GET", "/_wml/assets/islands.js", islands_asset_handler);
                     routes_meta.push(serde_json::json!({
                         "method": "GET",
