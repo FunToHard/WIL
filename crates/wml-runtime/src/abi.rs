@@ -301,3 +301,17 @@ pub unsafe extern "C" fn wml_res_set_status(res: *mut WmlHttpResponse, status: u
         (*res).status = status;
     }
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn wml_res_set_content_type(
+    res: *mut WmlHttpResponse,
+    ct_ptr: *const u8,
+    ct_len: usize,
+) {
+    if !res.is_null() && !ct_ptr.is_null() {
+        (*res).content_type = WmlSlice {
+            ptr: ct_ptr,
+            len: ct_len,
+        };
+    }
+}

@@ -77,7 +77,65 @@ impl ClientTranspiler {
         let mut js = String::new();
         js.push_str(EMBEDDED_SIGNALS_CORE);
         js.push_str("\n\n");
+        js.push_str(&self.transpile_island_body(ui, arena)?);
+        Ok(js)
+    }
 
+    pub fn bundle_islands(&self, uis: &[&UiDecl], arena: &AstArena) -> Result<String, String> {
+        let mut bundle = String::new();
+        bundle.push_str(EMBEDDED_SIGNALS_CORE);
+        bundle.push_str("\n\n");
+
+        for ui in uis {
+            let island_code = self.transpile_island_body(ui, arena)?;
+            bundle.push_str(&island_code);
+            bundle.push_str("\n\n");
+        }
+
+        bundle.push_str(
+            r#"// Auto-mount all declared client islands
+export function auto_mount() {
+    if (typeof document === 'undefined') return;
+    document.querySelectorAll('[data-wml-island]').forEach(container => {
+        const islandName = container.getAttribute('data-wml-island');
+        let props = {};
+        try {
+            const rawProps = container.getAttribute('data-wml-props');
+            if (rawProps) props = JSON.parse(rawProps);
+        } catch (_) {}
+"#,
+        );
+
+        for ui in uis {
+            bundle.push_str(&format!(
+                r#"        if (islandName === '{name}') {{
+            container.innerHTML = '';
+            mount_{name}(container, props);
+        }}
+"#,
+                name = ui.name
+            ));
+        }
+
+        bundle.push_str(
+            r#"    });
+}
+
+if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', auto_mount);
+    } else {
+        auto_mount();
+    }
+}
+"#,
+        );
+
+        Ok(bundle)
+    }
+
+    pub fn transpile_island_body(&self, ui: &UiDecl, arena: &AstArena) -> Result<String, String> {
+        let mut js = String::new();
         js.push_str(&format!(
             "export function mount_{}(container, props = {{}}) {{\n",
             ui.name

@@ -78,6 +78,10 @@ impl CraneliftJitBackend {
         jit_builder.symbol("wml_jwt_verify", wml_jwt_verify as *const u8);
         jit_builder.symbol("wml_res_set_body", wml_res_set_body as *const u8);
         jit_builder.symbol("wml_res_set_status", wml_res_set_status as *const u8);
+        jit_builder.symbol(
+            "wml_res_set_content_type",
+            wml_res_set_content_type as *const u8,
+        );
         jit_builder.symbol("wml_db_insert", wml_db_insert as *const u8);
         jit_builder.symbol("wml_db_get", wml_db_get as *const u8);
         jit_builder.symbol("wml_record_get_field", wml_record_get_field as *const u8);
@@ -124,6 +128,11 @@ impl CraneliftJitBackend {
             ("wml_jwt_verify", &[ptr_type, ptr_type], Some(types::I8)),
             ("wml_res_set_body", &[ptr_type, ptr_type, types::I64], None),
             ("wml_res_set_status", &[ptr_type, types::I16], None),
+            (
+                "wml_res_set_content_type",
+                &[ptr_type, ptr_type, types::I64],
+                None,
+            ),
             (
                 "wml_db_insert",
                 &[ptr_type, ptr_type, ptr_type],

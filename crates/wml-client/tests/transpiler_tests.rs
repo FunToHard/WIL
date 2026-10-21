@@ -77,3 +77,31 @@ ui TestIsland() {
     // Let statement supported in event block
     assert!(js.contains("let x = 1;"));
 }
+
+#[test]
+fn test_bundle_islands_with_auto_mount() {
+    let source = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/counter.wml"
+    ))
+    .unwrap();
+    let (program, arena) = parse(&source).unwrap();
+
+    let uis: Vec<_> = program
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Ui(ui) => Some(ui),
+            _ => None,
+        })
+        .collect();
+
+    let transpiler = ClientTranspiler::new();
+    let bundle = transpiler.bundle_islands(&uis, &arena).unwrap();
+
+    assert!(bundle.contains("export function signal"));
+    assert!(bundle.contains("export function mount_ClickIsland"));
+    assert!(bundle.contains("export function auto_mount()"));
+    assert!(bundle.contains("data-wml-island"));
+    assert!(bundle.contains("mount_ClickIsland(container, props);"));
+}
