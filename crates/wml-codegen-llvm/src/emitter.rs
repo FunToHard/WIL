@@ -211,8 +211,14 @@ impl LlvmIrEmitter {
         }
 
         // 2. Entry block: allocate local memory locations and store parameters
+        let mut block_params: HashMap<BlockId, Vec<ValueId>> = HashMap::new();
+        for bb in &func.blocks {
+            let p_vals = bb.params.iter().map(|(v, _)| *v).collect();
+            block_params.insert(bb.id, p_vals);
+        }
+
         ir.push_str("entry:\n");
-        let mut sorted_vals: Vec<_> = value_types.into_iter().collect();
+        let mut sorted_vals: Vec<_> = value_types.clone().into_iter().collect();
         sorted_vals.sort_by_key(|(v, _)| v.0);
 
         for (v, ty) in &sorted_vals {
@@ -240,16 +246,24 @@ impl LlvmIrEmitter {
             ir.push_str(&format!("bb{}:\n", bb.id.0));
 
             for (dest, inst, ty) in &bb.instructions {
-                self.emit_instruction(ir, *dest, inst, ty);
+                self.emit_instruction(ir, *dest, inst, ty, func, &value_types);
             }
 
-            self.emit_terminator(ir, &bb.terminator, &func.return_ty);
+            self.emit_terminator(ir, &bb.terminator, &func.return_ty, &block_params);
         }
 
         ir.push_str("}\n");
     }
 
-    fn emit_instruction(&self, ir: &mut String, dest: ValueId, inst: &MirInst, ty: &MirType) {
+    fn emit_instruction(
+        &self,
+        ir: &mut String,
+        dest: ValueId,
+        inst: &MirInst,
+        ty: &MirType,
+        func: &MirFunction,
+        value_types: &HashMap<ValueId, MirType>,
+    ) {
         match inst {
             MirInst::Const(c) => match c {
                 MirConstant::Int(n) => {
@@ -426,14 +440,22 @@ impl LlvmIrEmitter {
                 ));
             }
             MirInst::AllocReqArena { size, align } => {
-                ir.push_str(&format!(
-                    "  %arena_{} = load ptr, ptr %v_0, align 8\n",
-                    dest.0
-                ));
-                ir.push_str(&format!(
-                    "  %al_{} = call ptr @wml_arena_alloc(ptr %arena_{}, i64 {}, i64 {})\n",
-                    dest.0, dest.0, size, align
-                ));
+                if func.is_route_handler && !func.params.is_empty() {
+                    let arena_val_id = func.params[0].0;
+                    ir.push_str(&format!(
+                        "  %arena_{} = load ptr, ptr %v_{}, align 8\n",
+                        dest.0, arena_val_id.0
+                    ));
+                    ir.push_str(&format!(
+                        "  %al_{} = call ptr @wml_arena_alloc(ptr %arena_{}, i64 {}, i64 {})\n",
+                        dest.0, dest.0, size, align
+                    ));
+                } else {
+                    ir.push_str(&format!(
+                        "  %al_{} = call ptr @wml_arena_alloc(ptr null, i64 {}, i64 {})\n",
+                        dest.0, size, align
+                    ));
+                }
                 ir.push_str(&format!(
                     "  store ptr %al_{}, ptr %v_{}, align 8\n",
                     dest.0, dest.0
@@ -489,11 +511,24 @@ impl LlvmIrEmitter {
             MirInst::CallRuntime { intrinsic, args } => {
                 let mut arg_strs = Vec::new();
                 for (i, a) in args.iter().enumerate() {
+                    let arg_ty = if (intrinsic == "wml_res_set_body_i64"
+                        || intrinsic == "wml_res_set_body"
+                        || intrinsic == "wml_res_set_content_type")
+                        && i == 2
+                    {
+                        "i64"
+                    } else if intrinsic == "wml_res_set_status" && i == 1 {
+                        "i16"
+                    } else if let Some(t) = value_types.get(a) {
+                        Self::mir_type_to_llvm(t)
+                    } else {
+                        "ptr"
+                    };
                     ir.push_str(&format!(
-                        "  %c_arg_{}_{} = load ptr, ptr %v_{}, align 8\n",
-                        dest.0, i, a.0
+                        "  %c_arg_{}_{} = load {}, ptr %v_{}, align 8\n",
+                        dest.0, i, arg_ty, a.0
                     ));
-                    arg_strs.push(format!("ptr %c_arg_{}_{}", dest.0, i));
+                    arg_strs.push(format!("{} %c_arg_{}_{}", arg_ty, dest.0, i));
                 }
                 let ret_ty = Self::mir_type_to_llvm(ty);
                 if ret_ty == "void" {
@@ -545,7 +580,13 @@ impl LlvmIrEmitter {
         }
     }
 
-    fn emit_terminator(&self, ir: &mut String, term: &MirTerminator, return_ty: &MirType) {
+    fn emit_terminator(
+        &self,
+        ir: &mut String,
+        term: &MirTerminator,
+        return_ty: &MirType,
+        block_params: &HashMap<BlockId, Vec<ValueId>>,
+    ) {
         match term {
             MirTerminator::Return(opt_val) => {
                 if let Some(val_id) = opt_val {
@@ -560,29 +601,61 @@ impl LlvmIrEmitter {
                 }
             }
             MirTerminator::Jump { target, args } => {
-                // If target block has parameters, copy args into target block's parameters
-                for (i, arg_id) in args.iter().enumerate() {
-                    ir.push_str(&format!(
-                        "  %j_arg_{} = load i64, ptr %v_{}, align 8\n",
-                        i, arg_id.0
-                    ));
-                    ir.push_str(&format!(
-                        "  store i64 %j_arg_{}, ptr %v_{}, align 8\n",
-                        i, arg_id.0
-                    ));
+                if let Some(target_p) = block_params.get(target) {
+                    for (i, arg_id) in args.iter().enumerate() {
+                        if let Some(param_id) = target_p.get(i) {
+                            ir.push_str(&format!(
+                                "  %j_arg_{}_{} = load i64, ptr %v_{}, align 8\n",
+                                target.0, i, arg_id.0
+                            ));
+                            ir.push_str(&format!(
+                                "  store i64 %j_arg_{}_{}, ptr %v_{}, align 8\n",
+                                target.0, i, param_id.0
+                            ));
+                        }
+                    }
                 }
                 ir.push_str(&format!("  br label %bb{}\n", target.0));
             }
             MirTerminator::Branch {
                 cond,
                 then_block,
+                then_args,
                 else_block,
-                ..
+                else_args,
             } => {
                 ir.push_str(&format!(
                     "  %cond_val = load i1, ptr %v_{}, align 1\n",
                     cond.0
                 ));
+                if let Some(target_p) = block_params.get(then_block) {
+                    for (i, arg_id) in then_args.iter().enumerate() {
+                        if let Some(param_id) = target_p.get(i) {
+                            ir.push_str(&format!(
+                                "  %br_t_arg_{}_{} = load i64, ptr %v_{}, align 8\n",
+                                then_block.0, i, arg_id.0
+                            ));
+                            ir.push_str(&format!(
+                                "  store i64 %br_t_arg_{}_{}, ptr %v_{}, align 8\n",
+                                then_block.0, i, param_id.0
+                            ));
+                        }
+                    }
+                }
+                if let Some(target_p) = block_params.get(else_block) {
+                    for (i, arg_id) in else_args.iter().enumerate() {
+                        if let Some(param_id) = target_p.get(i) {
+                            ir.push_str(&format!(
+                                "  %br_e_arg_{}_{} = load i64, ptr %v_{}, align 8\n",
+                                else_block.0, i, arg_id.0
+                            ));
+                            ir.push_str(&format!(
+                                "  store i64 %br_e_arg_{}_{}, ptr %v_{}, align 8\n",
+                                else_block.0, i, param_id.0
+                            ));
+                        }
+                    }
+                }
                 ir.push_str(&format!(
                     "  br i1 %cond_val, label %bb{}, label %bb{}\n",
                     then_block.0, else_block.0
