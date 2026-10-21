@@ -10,9 +10,14 @@ fn test_deterministic_id_generation() {
     let range = ByteRange { start: 10, end: 25 };
     let id1 = generate_diagnostic_id("examples/auth.wml", &range, "WML-TYP-2001");
     let id2 = generate_diagnostic_id("examples/auth.wml", &range, "WML-TYP-2001");
+    let id_windows = generate_diagnostic_id("examples\\auth.wml", &range, "WML-TYP-2001");
     let id3 = generate_diagnostic_id("examples/auth.wml", &range, "WML-TYP-2041");
 
     assert_eq!(id1, id2);
+    assert_eq!(
+        id1, id_windows,
+        "Windows and Unix paths must produce identical deterministic IDs"
+    );
     assert_ne!(id1, id3);
     assert!(id1.starts_with("diag_"));
     assert_eq!(id1.len(), 17); // "diag_" + 12 hex chars
@@ -165,4 +170,41 @@ fn test_diagnostic_report_json_schema_conformance() {
     );
     assert_eq!(parsed["diagnostics"][0]["type_info"]["expected"], "str");
     assert_eq!(parsed["compilation_metrics"]["target"], "check-only");
+}
+
+#[test]
+fn test_utf8_char_boundary_and_collision_detection() {
+    let source = "let greeting = \"🚀 hello world\"";
+    // The rocket emoji is 4 bytes (0..4 in string literal: " at 15, rocket at 16..20)
+    let rocket_start = source.find('🚀').unwrap();
+
+    // Slicing in middle of 4-byte UTF-8 character must fail safely without panic
+    let invalid_rep = Replacement {
+        file: "test.wml".to_string(),
+        byte_range: ByteRange {
+            start: rocket_start + 1,
+            end: rocket_start + 3,
+        },
+        new_text: "fail".to_string(),
+    };
+    let err = apply_replacement(source, &invalid_rep);
+    assert!(err.is_err());
+    assert!(err.unwrap_err().contains("UTF-8 character boundaries"));
+
+    // Colliding replacements sharing identical start offset must be caught
+    let rep1 = Replacement {
+        file: "test.wml".to_string(),
+        byte_range: ByteRange { start: 10, end: 15 },
+        new_text: "a".to_string(),
+    };
+    let rep2 = Replacement {
+        file: "test.wml".to_string(),
+        byte_range: ByteRange { start: 10, end: 12 },
+        new_text: "b".to_string(),
+    };
+    let coll_err = apply_replacements_batch(source, &[rep1, rep2]);
+    assert!(coll_err.is_err());
+    assert!(coll_err
+        .unwrap_err()
+        .contains("Overlapping replacements detected"));
 }

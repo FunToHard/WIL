@@ -254,8 +254,9 @@ pub fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
 }
 
 pub fn generate_diagnostic_id(file: &str, byte_range: &ByteRange, code: &str) -> String {
+    let normalized_file = file.replace('\\', "/");
     let mut hash = 0xcbf29ce484222325u64;
-    for &b in file.as_bytes() {
+    for &b in normalized_file.as_bytes() {
         hash = (hash ^ (b as u64)).wrapping_mul(0x100000001b3u64);
     }
     for &b in code.as_bytes() {
@@ -369,6 +370,12 @@ pub fn apply_replacement(source: &str, replacement: &Replacement) -> Result<Stri
             source.len()
         ));
     }
+    if !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+        return Err(format!(
+            "Byte range [{}..{}] does not align with UTF-8 character boundaries",
+            start, end
+        ));
+    }
     let mut new_source =
         String::with_capacity(source.len() + replacement.new_text.len() - (end - start));
     new_source.push_str(&source[..start]);
@@ -386,12 +393,19 @@ pub fn apply_replacements_batch(
     }
 
     let mut sorted = replacements.to_vec();
-    // Sort descending by start offset
-    sorted.sort_by_key(|b| std::cmp::Reverse(b.byte_range.start));
+    // Sort descending by start offset, then descending by end offset for deterministic collision detection
+    sorted.sort_by_key(|b| {
+        (
+            std::cmp::Reverse(b.byte_range.start),
+            std::cmp::Reverse(b.byte_range.end),
+        )
+    });
 
-    // Check for overlapping byte ranges
+    // Check for overlapping byte ranges or identical start points
     for i in 0..sorted.len().saturating_sub(1) {
-        if sorted[i + 1].byte_range.end > sorted[i].byte_range.start {
+        if sorted[i + 1].byte_range.end > sorted[i].byte_range.start
+            || sorted[i + 1].byte_range.start == sorted[i].byte_range.start
+        {
             return Err(format!(
                 "Overlapping replacements detected: [{}..{}] and [{}..{}]",
                 sorted[i + 1].byte_range.start,
