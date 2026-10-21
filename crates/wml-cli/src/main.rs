@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use wml_client::ClientTranspiler;
 use wml_codegen_cranelift::CraneliftJitBackend;
+use wml_codegen_llvm::{LlvmCompiler, TargetConfig, TargetOs};
 use wml_diagnostics::{
     ByteRange, Diagnostic, DiagnosticCategory, DiagnosticReport, DiagnosticSeverity,
     DiagnosticStatus, DiagnosticSummary, Location, Span,
@@ -73,6 +74,9 @@ enum Commands {
         /// Release mode with LTO
         #[arg(long)]
         release: bool,
+        /// Target architecture (e.g. x86_64, aarch64, arm64)
+        #[arg(long)]
+        target: Option<String>,
         /// Output directory for production build
         #[arg(short, long, default_value = "dist")]
         out_dir: PathBuf,
@@ -477,6 +481,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Build {
             file,
             release,
+            target,
             out_dir,
             format,
         } => {
@@ -650,7 +655,59 @@ fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // 7. Write manifest.json
+            // 7. LLVM AOT Compilation for Production Release
+            let target_config = if let Some(t) = &target {
+                TargetConfig::parse(t).unwrap_or_else(TargetConfig::host)
+            } else {
+                TargetConfig::host()
+            };
+
+            let mut llvm_ir_meta = None;
+            let mut binary_meta = None;
+
+            if release {
+                let llvm_compiler = LlvmCompiler::new();
+                match llvm_compiler.compile_to_ir(&mir_module, &target_config) {
+                    Ok(ir) => {
+                        let ir_path = out_dir.join("app.ll");
+                        fs::write(&ir_path, &ir)?;
+                        llvm_ir_meta = Some(serde_json::json!({
+                            "path": ir_path.display().to_string(),
+                            "size_bytes": ir.len(),
+                            "target_triple": target_config.triple(),
+                        }));
+
+                        if LlvmCompiler::is_clang_available() {
+                            let bin_dir = out_dir.join("bin");
+                            fs::create_dir_all(&bin_dir)?;
+                            let obj_path = bin_dir.join(format!(
+                                "app.{}",
+                                if target_config.os == TargetOs::Windows {
+                                    "obj"
+                                } else {
+                                    "o"
+                                }
+                            ));
+                            if let Ok(compiled_path) =
+                                llvm_compiler.compile_to_object(&ir, &target_config, &obj_path)
+                            {
+                                let sz = fs::metadata(&compiled_path).map(|m| m.len()).unwrap_or(0);
+                                binary_meta = Some(serde_json::json!({
+                                    "path": compiled_path.display().to_string(),
+                                    "size_bytes": sz,
+                                    "target_triple": target_config.triple(),
+                                    "status": "compiled_object",
+                                }));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: LLVM IR generation failed: {}", e);
+                    }
+                }
+            }
+
+            // 8. Write manifest.json
             let pages_meta: Vec<String> = mir_module
                 .routes
                 .iter()
@@ -663,6 +720,7 @@ fn main() -> anyhow::Result<()> {
                 "version": "1.0.0",
                 "entry": file_str,
                 "release": release,
+                "target_triple": target_config.triple(),
                 "routes": mir_module.routes.iter().map(|r| serde_json::json!({
                     "method": r.method,
                     "path": r.path,
@@ -670,6 +728,8 @@ fn main() -> anyhow::Result<()> {
                 "pages": pages_meta,
                 "islands": islands_meta,
                 "assets": assets_meta,
+                "llvm_ir": llvm_ir_meta,
+                "binary": binary_meta,
                 "timestamp": current_timestamp,
             });
             fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
@@ -681,9 +741,12 @@ fn main() -> anyhow::Result<()> {
                     "event": "build_complete",
                     "target": out_dir.display().to_string(),
                     "release": release,
+                    "target_triple": target_config.triple(),
                     "pages": pages_meta,
                     "islands": islands_meta,
                     "assets": assets_meta,
+                    "llvm_ir": llvm_ir_meta,
+                    "binary": binary_meta,
                     "build_duration_ms": build_duration,
                     "timestamp": current_timestamp,
                 });
@@ -691,6 +754,15 @@ fn main() -> anyhow::Result<()> {
             } else {
                 println!("⚡ [WML Build] Successfully compiled {}", file_str);
                 println!("📦 Target directory: {}", out_dir.display());
+                if release {
+                    println!("🚀 Release Target Triple: {}", target_config.triple());
+                    if let Some(ir_m) = &llvm_ir_meta {
+                        println!("📝 LLVM IR: {}", ir_m["path"]);
+                    }
+                    if let Some(bin_m) = &binary_meta {
+                        println!("📦 Native Binary: {}", bin_m["path"]);
+                    }
+                }
                 println!("📄 Pages: {}", pages_meta.len());
                 println!("🏝️  Client islands: {}", islands_meta.len());
                 println!("⏱️  Build duration: {:.2}ms", build_duration);
